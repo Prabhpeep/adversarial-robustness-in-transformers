@@ -10,7 +10,7 @@ from torch.linalg import norm
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 
-from liptrf.models.layers.linear import LinearX
+from models.CertVIT_regularised.linear import LinearX
 
 # helpers
 
