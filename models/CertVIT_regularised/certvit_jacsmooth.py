@@ -53,10 +53,9 @@ def softmax_jacobian_norm_from_attn(attn, eps=1e-5):
     # This is much smoother than max(log(g1)).
     per_head_sum = torch.sum(g1, dim=-1)
     
-    # Log-barrier with stability epsilon added naturally
-    per_head_log = torch.log(per_head_sum + eps)
+   
 
-    return per_head_log.mean()
+    return per_head_sum.mean()
 
 
 
