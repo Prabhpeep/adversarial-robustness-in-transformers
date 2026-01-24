@@ -119,10 +119,13 @@ def train(args, model, device, train_loader,
         output = model(data)
         loss = criterion(output, target)
 
-        # --- Safely add JaSMin only when its weight (lmbda) != 0 ---
-        if args.jasmin_lambda != 0 and hasattr(model, "jasmin_loss"):
+        warmup_epochs = 5  
+        
+        if args.jasmin_lambda != 0 and hasattr(model, "jasmin_loss") and epoch > warmup_epochs:
             try:
                 jasmin_val = model.jasmin_loss()
+
+
                 # convert to tensor if necessary
                 if not torch.is_tensor(jasmin_val):
                     jasmin_val = torch.tensor(float(jasmin_val), device=loss.device, dtype=loss.dtype)
