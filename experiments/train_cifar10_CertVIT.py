@@ -160,7 +160,7 @@ def train(args, model, device, train_loader,
         loss.backward()
 
         # Optional: gradient clipping to prevent exploding grads (uncomment to enable)
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         optimizer.step()
 
