@@ -1,64 +1,61 @@
-from math import ceil
-import numpy as np
 import torch
 import torch.nn as nn 
 from tqdm import tqdm 
-
-
 import torchattacks
+# pip install autoattack
+from autoattack import AutoAttack 
 
-# TODO: use args not hard code 
-
-def evaluate_pgd(loader, model, epsilon, niter, alpha, device):
+def evaluate_pgd(loader, model, epsilon, device, attack_type='pgd'):
     model.eval()
+    
+    # 1. FIX: Track total samples explicitly to avoid "i" indexing bugs
     correct = 0
-    print(epsilon, niter, alpha)
+    total = 0
+    
+    print(f"Running {attack_type} with epsilon {epsilon}...")
 
-    attack = torchattacks.PGDL2(
-        model,
-        eps=epsilon,
-        alpha=alpha,
-        steps=niter,
-        random_start=True
-    )
+    if attack_type == 'autoattack':
+        # AutoAttack (Standard for papers)
+        # version='standard' runs APGD-CE, APGD-DLR, FAB, and Square
+        adversary = AutoAttack(model, norm='L2', eps=epsilon, version='standard', device=device)
+    else:
+        # Standard PGD (Quick check)
+        adversary = torchattacks.PGDL2(
+            model,
+            eps=epsilon,
+            alpha=epsilon/4,  # Heuristic step size
+            steps=50,         # 50 steps is better than 10 or 20 for evaluation
+            random_start=True
+        )
 
-    for i, (X, y) in tqdm(enumerate(loader)):
+    # 2. FIX: Disable gradients globally for model weights 
+    # (We only need gradients on the INPUT X, which attacks handle automatically)
+    for p in model.parameters():
+        p.requires_grad = False
+
+    for X, y in tqdm(loader):
         X, y = X.to(device), y.to(device)
+        
+        if attack_type == 'autoattack':
+            # AutoAttack returns the adversarial images directly
+            X_adv = adversary.run_standard_evaluation(X, y, bs=X.shape[0])
+        else:
+            # PGD Generation
+            X_adv = adversary(X, y)
 
-        # --- IMPORTANT: disable parameter grads ---
-        for p in model.parameters():
-            p.requires_grad_(False)
+        # Final Inference (No grad needed here)
+        with torch.no_grad():
+            out = model(X_adv)
+            pred = out.argmax(dim=1)
+            
+            # 3. FIX: Simple accuracy accumulation
+            correct += pred.eq(y).sum().item()
+            total += X.shape[0]
 
-        X_pgd = attack(X, y)
-
-        # --- re-enable parameter grads ---
-        for p in model.parameters():
-            p.requires_grad_(True)
-
-        out = model(X_pgd)
-        pred = out.argmax(dim=1, keepdim=True)
-        correct += pred.eq(y.view_as(pred)).sum().item()
-
-        if i * X.shape[0] > 1000:
+        # Break after ~1000 samples for quick checks (remove for full eval)
+        if total >= 1000:
             break
 
-    acc = 100. * correct / (i * X.shape[0])
-    print(f"PGD Accuracy {acc:.2f}")
+    acc = 100. * correct / total
+    print(f"{attack_type} Accuracy: {acc:.2f}%")
     return acc
-
-
-def vra_sparse(y_true, y_pred):
-    labels = y_true[:,0]
-
-    return torch.sum(labels.eq(torch.argmax(y_pred, axis=1)).float())
-
-def vra_cat(y_true, y_pred):
-    labels = torch.argmax(y_true, axis=1)[:,None]
-
-    return vra_sparse(labels, y_pred)
-
-def vra(y_true, y_pred):
-    if y_true.shape[1] == 1: 
-        return vra_sparse(y_true, y_pred)
-    else: 
-        return vra_cat(y_true, y_pred)
