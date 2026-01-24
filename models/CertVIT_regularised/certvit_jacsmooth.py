@@ -58,19 +58,6 @@ def softmax_jacobian_norm_from_attn(attn, eps=1e-5):
 
     return per_head_log.mean()
 
-    
-
-
-    # average over batch and heads
-    return per_head.mean()
-
-    
-
-
-    # average over batch and heads
-    return per_head.mean()
-
-
 
 
 class PreNorm(nn.Module):
