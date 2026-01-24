@@ -200,7 +200,8 @@ class L2Attention(nn.Module):
         H = self.heads
         v1 = np.sqrt(N / (D / H))
         v2 = 4 * lambertw(N / np.exp(1)).real + 1
-        v3 = torch.sqrt(self.to_q.lipschitz() + self.to_v.lipschitz()) * self.to_out.lipschitz()
+        inner_sum = self.to_q.lipschitz() + self.to_v.lipschitz()
+        v3 = torch.sqrt(torch.tensor(inner_sum, device=self.to_out.weight.device)) * self.to_out.lipschitz()
         self.lc = v1 * v2 * v3
         return self.lc
     
