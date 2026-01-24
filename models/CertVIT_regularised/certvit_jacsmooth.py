@@ -22,28 +22,38 @@ import torch
 def pair(t):
     return t if isinstance(t, tuple) else (t, t)
 # --- JaSMin helper (softmax jacobian norm) ---
-def softmax_jacobian_norm_from_attn(attn, eps=1e-12):
+def softmax_jacobian_norm_from_attn(attn, eps=1e-5):
     """
-    attn: Tensor of shape (B, H, N, N)
-          Softmax attention probabilities.
-    Returns:
-        Scalar JaSMin loss: max-token log g1, averaged over batch & heads.
+    Smooth JaSMin loss (LogSumExp variant).
+    Optimizes the same bound but with dense, stable gradients.
     """
-
-    # sort probabilities along last dimension (descending)
-    # gives x_(1), x_(2)
-    top2, _ = torch.topk(attn, k=2, dim=-1)   # shape (B, H, N, 2)
+    # 1. Sort as before
+    top2, _ = torch.topk(attn, k=2, dim=-1)
     x1 = top2[..., 0]
     x2 = top2[..., 1]
 
-    # g1(p) = x1 * (1 - x1 + x2)
+    # 2. Compute the bound term
+    # g1 represents the upper bound of the Jacobian norm for each token
     g1 = x1 * (1.0 - x1 + x2)
+    
+    # 3. FIX A: Remove the hard clamp cliff. 
+    # Instead of clamping, we add eps inside the log.
+    # This preserves the gradient slope without the 1/0 explosion.
+    
+    # 4. FIX B: Replace 'max' with 'sum' (smooth upper bound).
+    # Why? max() only sends gradients to ONE token (the worst one). 
+    # sum() sends gradients to ALL tokens, pushing the whole distribution down.
+    # Mathematically: max(g_i) <= sum(g_i). Minimizing sum forces max down too.
+    
+    # Calculate Log-Sum-Exp effectively:
+    # We want to minimize log(sum(g1)). 
+    # This is much smoother than max(log(g1)).
+    per_head_sum = torch.sum(g1, dim=-1)
+    
+    # Log-barrier with stability epsilon added naturally
+    per_head_log = torch.log(per_head_sum + eps)
 
-    # numerical stability
-    g1 = torch.clamp(g1, min=eps)
-
-    # max over tokens (worst-case token per head)
-    per_head = torch.max(torch.log(g1), dim=-1).values  # (B, H)
+    return per_head_log.mean()
 
     
 
