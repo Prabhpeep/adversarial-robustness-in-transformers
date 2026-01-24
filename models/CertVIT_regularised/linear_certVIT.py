@@ -93,7 +93,7 @@ class LinearX(nn.Module):
 
         self.last_sigma = float(sigma_val)
         self.lc = self.last_sigma
-        print(f"[DEBUG lipschitz] sigma_val={sigma_val:.6f}, weight_norm={torch.linalg.norm(W):.4f}")
+        # print(f"[DEBUG lipschitz] sigma_val={sigma_val:.6f}, weight_norm={torch.linalg.norm(W):.4f}")
 
         return self.last_sigma
 
