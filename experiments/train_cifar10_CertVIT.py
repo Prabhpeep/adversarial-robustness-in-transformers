@@ -112,40 +112,35 @@ def train(args, model, device, train_loader,
     total_ = 0.0
     epoch_jasmin_max = -float("inf")
 
-    # --- NUCLEAR OPTION: FORCE ORTHOGONAL INITIALIZATION ---
-    print(">>> NUCLEAR INIT: Forcing all LinearX layers to Orthogonal (Lip=1.0) <<<")
-    
+    # --- SAFE INIT: SCALED KAIMING ---
+    print(">>> SAFE INIT: Using Scaled Kaiming (Factor 0.1) <<<")
     with torch.no_grad():
         for name, module in model.named_modules():
-            # Find your custom Linear layers
             if "LinearX" in str(type(module)):
-                # 1. Force weights to be Orthogonal
-                # This sets the spectral norm to exactly 1.0
-                if module.weight.dim() == 2:
-                    torch.nn.init.orthogonal_(module.weight)
-                    print(f"   Re-initialized {name} to Orthogonal.")
+                # 1. Standard Kaiming Init (Reset to healthy distribution)
+                torch.nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
                 
-                # 2. Reset Bias to 0 to avoid noise
+                # 2. Scale it down by 10x (Drastically reduces starting Lipschitz)
+                module.weight.data.mul_(0.1)
+                
                 if module.bias is not None:
                     torch.nn.init.zeros_(module.bias)
 
-                # 3. Reset internal Spectral Norm buffers (if they exist)
-                # This stops the layer from remembering old "exploded" values
+                # 3. Reset Spectral Buffers
                 if hasattr(module, 'sigma'):
                     if torch.is_tensor(module.sigma):
                         module.sigma.fill_(1.0)
                     else:
                         module.sigma = 1.0
                 
-                # Reset power iteration vectors if they exist
+                # 4. Initialize Power Iteration Vectors Randomly
                 if hasattr(module, 'u'):
                     torch.nn.init.normal_(module.u)
                 if hasattr(module, 'v'):
                     torch.nn.init.normal_(module.v)
 
-    print(">>> NUCLEAR INIT COMPLETE <<<")
-    # -------------------------------------------------------
-
+    print(">>> SAFE INIT COMPLETE <<<")
+    # ---------------------------------
    
    
 
