@@ -112,44 +112,42 @@ def train(args, model, device, train_loader,
     total_ = 0.0
     epoch_jasmin_max = -float("inf")
 
-    # --- INSERT THIS BEFORE TRAINING LOOP ---
-   # --- CORRECTED PRE-TRAINING SCALING ---
-    print(">>> PRE-TRAINING SCALING: Normalizing weights to Lipschitz ~ 1.0 <<<")
-    with torch.no_grad():
-        # 1. Run dummy forward to init shapes
-        dummy_input = torch.randn(2, 3, 32, 32).to(device)
-        model(dummy_input)
-        
-        # 2. Iterate and Scale
-        for name, module in model.named_modules():
-            # Check if it's the LinearX layer
-            if "LinearX" in str(type(module)):
-                
-                # FIX: Call apply_spec() to force sigma update
-                if hasattr(module, 'apply_spec'):
-                    module.apply_spec()
-                
-                # Now access the updated sigma
-                if hasattr(module, 'sigma'):
-                    sigma = module.sigma
-                    
-                    # If sigma is a tensor, get its value. If float, use as is.
-                    sigma_val = sigma.item() if torch.is_tensor(sigma) else sigma
-                    
-                    if sigma_val > 1.0:
-                        # Normalize weight
-                        module.weight.data.div_(sigma_val)
-                        
-                        # Reset sigma buffer to 1.0 (so next forward pass is clean)
-                        if torch.is_tensor(sigma):
-                            module.sigma.fill_(1.0)
-                        else:
-                            module.sigma = 1.0
-                            
-                        print(f"   Scaled {name}: sigma {sigma_val:.2f} -> 1.0")
+    # --- NUCLEAR OPTION: FORCE ORTHOGONAL INITIALIZATION ---
+    print(">>> NUCLEAR INIT: Forcing all LinearX layers to Orthogonal (Lip=1.0) <<<")
     
-    print(">>> PRE-TRAINING SCALING COMPLETE <<<")
-    # ----------------------------------------
+    with torch.no_grad():
+        for name, module in model.named_modules():
+            # Find your custom Linear layers
+            if "LinearX" in str(type(module)):
+                # 1. Force weights to be Orthogonal
+                # This sets the spectral norm to exactly 1.0
+                if module.weight.dim() == 2:
+                    torch.nn.init.orthogonal_(module.weight)
+                    print(f"   Re-initialized {name} to Orthogonal.")
+                
+                # 2. Reset Bias to 0 to avoid noise
+                if module.bias is not None:
+                    torch.nn.init.zeros_(module.bias)
+
+                # 3. Reset internal Spectral Norm buffers (if they exist)
+                # This stops the layer from remembering old "exploded" values
+                if hasattr(module, 'sigma'):
+                    if torch.is_tensor(module.sigma):
+                        module.sigma.fill_(1.0)
+                    else:
+                        module.sigma = 1.0
+                
+                # Reset power iteration vectors if they exist
+                if hasattr(module, 'u'):
+                    torch.nn.init.normal_(module.u)
+                if hasattr(module, 'v'):
+                    torch.nn.init.normal_(module.v)
+
+    print(">>> NUCLEAR INIT COMPLETE <<<")
+    # -------------------------------------------------------
+
+   
+   
 
 
     for batch_idx, (data, target) in enumerate(train_loader):
