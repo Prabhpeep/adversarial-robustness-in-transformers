@@ -195,15 +195,28 @@ class L2Attention(nn.Module):
 
 
     def lipschitz(self):
-        N = self.n_value 
-        D = self.dim 
-        H = self.heads
-        v1 = np.sqrt(N / (D / H))
-        v2 = 4 * lambertw(N / np.exp(1)).real + 1
-        inner_sum = self.to_q.lipschitz() + self.to_v.lipschitz()
-        v3 = torch.sqrt(torch.tensor(inner_sum, device=self.to_out.weight.device)) * self.to_out.lipschitz()
-        self.lc = v1 * v2 * v3
-        return self.lc
+            N = self.n_value 
+            D = self.dim 
+            H = self.heads
+            v1 = np.sqrt(N / (D / H))
+            v2 = 4 * lambertw(N / np.exp(1)).real + 1
+            
+            inner_sum = self.to_q.lipschitz() + self.to_v.lipschitz()
+            
+            # 1. Compute on GPU (to handle potential tensor inputs in inner_sum)
+            # We wrap inner_sum in a tensor to ensure torch.sqrt works even if it's a float
+            t_inner = torch.tensor(inner_sum, device=self.to_out.weight.device)
+            v3_tensor = torch.sqrt(t_inner) * self.to_out.lipschitz()
+            
+            # 2. CRITICAL FIX: Convert GPU Tensor -> Python Float using .item()
+            # This prevents "cuda:0" errors when this value is used later (e.g., in v1 * v2 * v3)
+            if torch.is_tensor(v3_tensor):
+                v3 = v3_tensor.item()
+            else:
+                v3 = v3_tensor
+    
+            self.lc = v1 * v2 * v3
+            return self.lc
     
     def apply_spec(self):
         for layer in self.children():
