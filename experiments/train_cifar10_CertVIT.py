@@ -14,7 +14,7 @@ from torchvision import datasets, transforms
 from models.CertVIT_regularised.certvit_jacsmooth import ViT
 
 from utils.evaluate_CertVIT import evaluate_pgd
-
+import autoattack
 
 # def train(args, model, device, train_loader,
 #           optimizer, epoch, criterion, finetune=False):
@@ -388,14 +388,16 @@ def main():
         model.load_state_dict(best_state)
         model.eval()
         test(args, model, device, test_loader, criterion)
-        evaluate_pgd(test_loader, model, epsilon=36/255, niter=100, alpha=36/255/4, device=device)
+        # Remove 'niter' and 'alpha' since AutoAttack handles them internally
+        evaluate_pgd(test_loader, model, epsilon=36/255, device=device, attack_type='autoattack')
 
     if args.task == 'test':
         weight = torch.load(args.weight_path, map_location=device)
         model.load_state_dict(weight, strict=False)
         model.eval()
         test(args, model, device, test_loader, criterion)
-        evaluate_pgd(test_loader, model, epsilon=36/255, niter=100, alpha=36/255/4, device=device)
+        # Remove 'niter' and 'alpha' since AutoAttack handles them internally
+        evaluate_pgd(test_loader, model, epsilon=36/255, device=device, attack_type='autoattack')
 
 
 if __name__ == '__main__':
