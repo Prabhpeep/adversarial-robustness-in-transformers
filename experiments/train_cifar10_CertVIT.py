@@ -112,6 +112,35 @@ def train(args, model, device, train_loader,
     total_ = 0.0
     epoch_jasmin_max = -float("inf")
 
+    # --- INSERT THIS BEFORE TRAINING LOOP ---
+    print(">>> PRE-TRAINING SCALING: Normalizing weights to Lipschitz ~ 1.0 <<<")
+    with torch.no_grad():
+        # 1. Run a dummy forward pass to initialize any dynamic shapes/power iterations
+        dummy_input = torch.randn(2, 3, 32, 32).to(device)
+        model(dummy_input)
+        
+        # 2. Iterate through all LinearX layers and scale them down
+        # We assume the model is roughly depth 6. 
+        # If we divide each layer by its own norm, the total product becomes ~1.
+        for name, module in model.named_modules():
+            if "LinearX" in str(type(module)):
+                # Force update of spectral norm estimate
+                if hasattr(module, 'power_iter'):
+                    module.power_iter() 
+                
+                # Get current sigma
+                sigma = module.sigma
+                
+                # If sigma is large, scale weights down so sigma becomes 1.0
+                if sigma > 1.0:
+                    print(f"   Scaling {name}: sigma {sigma:.2f} -> 1.0")
+                    module.weight.data.div_(sigma)
+                    # Reset sigma buffer to 1.0
+                    module.sigma.fill_(1.0)
+    
+    print(">>> PRE-TRAINING SCALING COMPLETE <<<")
+    # ----------------------------------------
+
 
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
