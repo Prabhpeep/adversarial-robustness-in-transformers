@@ -19,28 +19,23 @@ def pair(t):
 # --- JaSMin helper (softmax jacobian norm) ---
 import torch
 
-def softmax_jacobian_norm_from_attn(attn, eps=1e-12):
+def pair(t):
+    return t if isinstance(t, tuple) else (t, t)
+# --- JaSMin helper (softmax jacobian norm) ---
+def softmax_jacobian_norm_from_attn(attn):
     """
-    attn: Tensor of shape (B, H, N, N)
-          Softmax attention probabilities.
-    Returns:
-        Scalar JaSMin loss: max-token log g1, averaged over batch & heads.
+    attn: (..., seq_len, seq_len) softmax outputs (probabilities).
+    Returns per-head/per-batch scalar norm (average across tokens & batch).
+    Uses analytic form sqrt(a_max * (1 - a_max)) per row/head then average.
     """
-
-    # sort probabilities along last dimension (descending)
-    # gives x_(1), x_(2)
-    top2, _ = torch.topk(attn, k=2, dim=-1)   # shape (B, H, N, 2)
-    x1 = top2[..., 0]
-    x2 = top2[..., 1]
-
-    # g1(p) = x1 * (1 - x1 + x2)
-    g1 = x1 * (1.0 - x1 + x2)
-
-    # numerical stability
-    g1 = torch.clamp(g1, min=eps)
-
-    # max over tokens (worst-case token per head)
-    per_head = torch.max(torch.log(g1), dim=-1).values  # (B, H)
+    # attn shape: (B, H, N, N) or (..., N, N)
+    # compute max along last dim (the softmax output per query position)
+    a_max, _ = attn.max(dim=-1)                # shape (..., N)
+    a_max = torch.clamp(a_max, 0.0, 1.0)
+    # now a_max in [0,1]; compute sqrt(a_max*(1-a_max)) per token
+    per_token = torch.sqrt(a_max * (1.0 - a_max) + 1e-12)  # stability
+    # average across tokens, heads, batch
+    return per_token.mean()
 
     
 
