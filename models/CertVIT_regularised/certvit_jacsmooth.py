@@ -27,6 +27,9 @@ def softmax_jacobian_norm_from_attn(attn, eps=1e-5):
     Smooth JaSMin loss (LogSumExp variant).
     Optimizes the same bound but with dense, stable gradients.
     """
+
+    if torch.isnan(attn).any():
+        return torch.tensor(0.0, device=attn.device, requires_grad=True)
     # 1. Sort as before
     top2, _ = torch.topk(attn, k=2, dim=-1)
     x1 = top2[..., 0]
