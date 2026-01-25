@@ -16,6 +16,21 @@ import os
 import torch
 import numpy as np
 
+# --- LOGGER CLASS (DUAL OUTPUT) ---
+class TeeLogger(object):
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "a")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush() # Ensure it writes immediately
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
 def save_attention_plots(model, loader, device, epoch, args, target_cdf):
     """
     Saves a clean visualization of Model Attention vs Zipfian Target.
@@ -304,12 +319,24 @@ def main():
     parser.add_argument('--use-margin', action='store_true')        
     parser.add_argument('--use-noise', action='store_true')         
     
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
+    except:
+        args = parser.parse_args([])
 
+    # --- LOGGER SETUP (REDIRECT PRINT TO FILE) ---
+    os.makedirs(args.output_dir, exist_ok=True)
+    log_file = os.path.join(args.output_dir, f"{args.name}.log")
+    sys.stdout = TeeLogger(log_file)
+    
+    print(f"======================================================")
+    print(f" STARTING EXPERIMENT: {args.name}")
+    print(f" Logs saved to: {log_file}")
+    print(f"======================================================")
+    
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Running on {device} | Experiment: {args.name}")
-
     # Data
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
