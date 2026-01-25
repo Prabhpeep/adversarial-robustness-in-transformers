@@ -32,70 +32,84 @@ class TeeLogger(object):
         self.log.flush()
 
 def save_attention_plots(model, loader, device, epoch, args, target_cdf):
-    """
-    Saves a clean visualization of Model Attention vs Zipfian Target.
-    Path format: {output_dir}/{experiment_name}_attn_epoch_{epoch}.png
-    """
     model.eval()
     
-    # Get a single batch
-    imgs, _ = next(iter(loader)) 
-    imgs = imgs.to(device)
-    
+    # Create directory if it doesn't exist
+    plot_dir = os.path.join(args.save_dir, "plots")
+    os.makedirs(plot_dir, exist_ok=True)
+
     with torch.no_grad():
-        _, attn_weights = model(imgs, return_attn=True)
+        # Get a single batch
+        data, _ = next(iter(loader))
+        data = data.to(device)
         
-    # Handle list of layers vs single tensor
-    if isinstance(attn_weights, list):
-        # Stack all layers: [Batch, Layers, Heads, WinSize, WinSize]
-        # We just flatten everything anyway
-        all_attn = torch.cat(attn_weights, dim=1) 
-    else:
-        all_attn = attn_weights
+        # Forward pass
+        if args.model_type == 'swin':
+             # Swin returns list of [Batch, num_heads, num_windows, window_size, window_size]
+             # or flattened versions depending on implementation
+            output, attn_weights = model(data, return_attn=True)
+        else:
+            output, attn_weights = model(data, return_attn=True)
 
-    # Flatten [Batch, Heads, Windows, SeqLen] -> [Total_Samples, SeqLen]
-    # We want to see the distribution over the LAST dimension (Sequence/Keys)
-    flat_attn = all_attn.view(-1, all_attn.shape[-1])
-    
-    # Sort descending to get the "Shape" profile
-    sorted_attn, _ = torch.sort(flat_attn, dim=-1, descending=True)
-    
-    # Calculate Mean Curve across all heads/images
-    mean_curve = sorted_attn.mean(dim=0).cpu().numpy()
-    
-    # Convert Target CDF back to PDF for plotting (Target Curve)
-    target_pdf = np.diff(target_cdf.cpu().numpy(), prepend=0)
+        # --- FIX: Handle Variable Sized Attention Maps (Swin) ---
+        if isinstance(attn_weights, list):
+            # Check if all layers have the same shape
+            first_shape = attn_weights[0].shape
+            is_uniform = all(a.shape == first_shape for a in attn_weights)
+            
+            if is_uniform:
+                # Standard ViT: concat all layers
+                all_attn = torch.cat(attn_weights, dim=1)
+            else:
+                # Swin/Hierarchical: Shapes mismatch. Use the LAST layer for visualization.
+                # The last layer contains the most abstract/semantic attention.
+                all_attn = attn_weights[-1]
+        else:
+            all_attn = attn_weights
+        # ---------------------------------------------------------
 
-    # --- PLOTTING ---
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    
-    # Plot 1: Standard Scale (The "Shape")
-    axes[0].plot(mean_curve, 'b-', linewidth=2, label='Model Actual')
-    axes[0].plot(target_pdf, 'r--', linewidth=2, label='Zipfian Target', alpha=0.7)
-    axes[0].set_title(f"Attention Shape (Epoch {epoch})")
-    axes[0].set_xlabel("Token Rank")
-    axes[0].set_ylabel("Probability Mass")
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-    
-    # Plot 2: Log-Log Scale (The "Power Law" Test)
-    # If the blue line is straight, it's a true power law.
-    axes[1].loglog(mean_curve, 'b-', linewidth=2, label='Model Actual')
-    axes[1].loglog(target_pdf, 'r--', linewidth=2, label='Target')
-    axes[1].set_title("Log-Log Scale (Power Law Check)")
-    axes[1].set_xlabel("Log Rank")
-    axes[1].grid(True, alpha=0.3)
-    
-    # Neat Filename: experiment_name + epoch
-    save_name = f"{args.name}_attn_ep{epoch:02d}.png"
-    save_path = os.path.join(args.output_dir, save_name)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150) # Higher DPI for neatness
-    plt.close()
-    
-    print(f"   [Visual] Saved attention plot to {save_path}")
+        # We want to plot the CDF of the attention weights
+        # Flatten: [Batch, Heads, N, N] -> [Total_Samples]
+        # Note: Swin might output [B, H, Windows, Window_Size, Window_Size]
+        # We just flatten everything to see the global distribution
+        flat_attn = all_attn.cpu().view(-1)
+        
+        # Sort for CDF
+        sorted_attn, _ = torch.sort(flat_attn, descending=True)
+        
+        # Normalize to 0-1 for CDF calculation (indices)
+        n = len(sorted_attn)
+        x_axis = torch.arange(n) / n
+        
+        # Compute CDF (cumulative sum of sorted weights)
+        # Ideally, we sort DESCENDING for Zipf, so the "head" is at the start
+        current_cdf = torch.cumsum(sorted_attn, dim=0)
+        current_cdf = current_cdf / current_cdf[-1] # Normalize max to 1
 
+        # Plot
+        plt.figure(figsize=(10, 6))
+        plt.plot(x_axis.numpy(), current_cdf.numpy(), label=f'Epoch {epoch} Actual')
+        
+        # Plot Target Zipf
+        if target_cdf is not None:
+             # Resize target to match visualization if needed, or just plot overlay
+             # Target is usually small [16], so we just scatter plot it or interpolate
+             t_np = target_cdf.view(-1).cpu().numpy()
+             t_x = np.linspace(0, 1, len(t_np))
+             plt.plot(t_x, t_np, 'r--', label='Target Zipf', linewidth=2)
+
+        plt.title(f'Attention Distribution CDF (Epoch {epoch})')
+        plt.xlabel('Token Rank (Normalized)')
+        plt.ylabel('Cumulative Mass')
+        plt.legend()
+        plt.grid(True)
+        
+        save_path = os.path.join(plot_dir, f"cdf_epoch_{epoch}.png")
+        plt.savefig(save_path)
+        plt.close()
+        
+    model.train()
+    
 def compute_zipfian_loss(attn_weights, target_cdf, order=1):
     """
     Computes Zipfian regularization loss. 
