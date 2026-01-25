@@ -98,41 +98,47 @@ def save_attention_plots(model, loader, device, epoch, args, target_cdf):
 
 def compute_zipfian_loss(attn_weights, target_cdf, order=1):
     """
-    Computes Wasserstein distance between attention distribution and Zipfian target.
-    order=1: L1 Distance (Standard)
-    order=2: L2 Distance (Weierstrass-Squared / Snap-to-Grid)
+    Computes the regularization loss by comparing sorted attention weights
+    to a Zipfian target CDF. Dynamically resizes target_cdf if dimensions mismatch.
     """
-    loss_val = 0.0
-    count = 0
-    
-    # Handle list of lists (from multiple layers)
-    if not isinstance(attn_weights, (list, tuple)):
-        attn_weights = [attn_weights]
-
-    for layer_attn in attn_weights:
-        # layer_attn shape: [Batch*NumWindows, Heads, WinSize, WinSize]
-        # We flatten to observe the distribution over the keys (last dim)
-        B, H, S, _ = layer_attn.shape
-        flat_attn = layer_attn.view(-1, S)
+    loss = 0.0
+    for attn in attn_weights:
+        # attn shape: [Batch, Heads, N, N] -> we care about the last dimension (attention over N tokens)
+        # Flatten the batch and head dimensions
+        B, H, N, _ = attn.shape
         
-        # Sort Descending to get the "Shape"
-        sorted_attn, _ = torch.sort(flat_attn, dim=-1, descending=True)
-        current_cdf = torch.cumsum(sorted_attn, dim=-1)
+        # 1. Get the Current CDF from attention weights
+        # Sort weights descending
+        sorted_weights, _ = torch.sort(attn.view(-1, N), dim=-1, descending=True)
+        # Compute Cumulative Sum (CDF)
+        current_cdf = torch.cumsum(sorted_weights, dim=-1)
         
-        # Ensure target on correct device
-        if target_cdf.device != current_cdf.device:
-            target_cdf = target_cdf.to(current_cdf.device)
+        # 2. Prepare the Target CDF
+        # Check if target dimension matches current dimension (N)
+        if target_cdf.shape[1] != N:
+            # Interpolate target_cdf to match N
+            # target_cdf is [1, Original_N]. We reshape to [1, 1, Original_N] for interpolation
+            resized_target = torch.nn.functional.interpolate(
+                target_cdf.unsqueeze(0), 
+                size=N, 
+                mode='linear', 
+                align_corners=False
+            ).squeeze(0) # Back to [1, N]
             
-        target = target_cdf.unsqueeze(0).expand_as(current_cdf)
-        
-        if order == 1:
-            loss_val += torch.mean(torch.abs(current_cdf - target))
-        elif order == 2:
-            loss_val += torch.mean(torch.pow(current_cdf - target, 2))
-            
-        count += 1
+            # Re-normalize to ensure max is 1.0 (interpolation might shift slightly)
+            resized_target = resized_target / resized_target.max()
+        else:
+            resized_target = target_cdf
 
-    return loss_val / count if count > 0 else torch.tensor(0.0, device=target_cdf.device)
+        # 3. Expand Target to match Batch size
+        target = resized_target.expand_as(current_cdf)
+
+        # 4. Compute Loss (MSE or L1 between CDFs)
+        # Using L1 loss here as it's often more stable for distributions
+        loss += torch.nn.functional.l1_loss(current_cdf, target)
+
+    # Average loss over number of layers/blocks
+    return loss / len(attn_weights)
 
 def lipschitz_margin_loss(logits, targets, margin=0.3):
     """
