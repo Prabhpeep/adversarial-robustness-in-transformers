@@ -174,7 +174,7 @@ class SwinTransformerBlock(nn.Module):
         self.gelu2 = nn.GELU()
         self.register_buffer("attn_mask", attn_mask)
 
-    def forward(self, x):
+    def forward(self, x, return_attn=Flase):
         H, W = self.input_resolution
         B, L, C = x.shape
         assert L == H * W, "flatten img_tokens has wrong size"
