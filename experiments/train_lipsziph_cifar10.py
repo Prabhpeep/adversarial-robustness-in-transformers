@@ -34,9 +34,12 @@ class TeeLogger(object):
 def save_attention_plots(model, loader, device, epoch, args, target_cdf):
     model.eval()
     
-    # Create directory if it doesn't exist
-    plot_dir = os.path.join(args.save_dir, "plots")
+    # --- FIX: Handle missing 'save_dir' attribute safely ---
+    # Tries to find 'save_dir', then 'output_dir', then defaults to 'logs_experiment'
+    base_dir = getattr(args, 'save_dir', getattr(args, 'output_dir', 'logs_experiment'))
+    plot_dir = os.path.join(base_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
+    # -------------------------------------------------------
 
     with torch.no_grad():
         # Get a single batch
@@ -44,12 +47,16 @@ def save_attention_plots(model, loader, device, epoch, args, target_cdf):
         data = data.to(device)
         
         # Forward pass
-        if args.model_type == 'swin':
-             # Swin returns list of [Batch, num_heads, num_windows, window_size, window_size]
-             # or flattened versions depending on implementation
+        # Swin vs Standard ViT handling
+        try:
             output, attn_weights = model(data, return_attn=True)
-        else:
-            output, attn_weights = model(data, return_attn=True)
+        except TypeError:
+            # Fallback if model doesn't accept return_attn
+            output = model(data)
+            attn_weights = None
+
+        if attn_weights is None:
+            return # Skip if no attention
 
         # --- FIX: Handle Variable Sized Attention Maps (Swin) ---
         if isinstance(attn_weights, list):
@@ -61,39 +68,26 @@ def save_attention_plots(model, loader, device, epoch, args, target_cdf):
                 # Standard ViT: concat all layers
                 all_attn = torch.cat(attn_weights, dim=1)
             else:
-                # Swin/Hierarchical: Shapes mismatch. Use the LAST layer for visualization.
-                # The last layer contains the most abstract/semantic attention.
+                # Swin/Hierarchical: Shapes mismatch. Use the LAST layer.
                 all_attn = attn_weights[-1]
         else:
             all_attn = attn_weights
         # ---------------------------------------------------------
 
-        # We want to plot the CDF of the attention weights
-        # Flatten: [Batch, Heads, N, N] -> [Total_Samples]
-        # Note: Swin might output [B, H, Windows, Window_Size, Window_Size]
-        # We just flatten everything to see the global distribution
+        # Plotting CDF
         flat_attn = all_attn.cpu().view(-1)
-        
-        # Sort for CDF
         sorted_attn, _ = torch.sort(flat_attn, descending=True)
         
-        # Normalize to 0-1 for CDF calculation (indices)
         n = len(sorted_attn)
         x_axis = torch.arange(n) / n
         
-        # Compute CDF (cumulative sum of sorted weights)
-        # Ideally, we sort DESCENDING for Zipf, so the "head" is at the start
         current_cdf = torch.cumsum(sorted_attn, dim=0)
-        current_cdf = current_cdf / current_cdf[-1] # Normalize max to 1
+        current_cdf = current_cdf / current_cdf[-1]
 
-        # Plot
         plt.figure(figsize=(10, 6))
         plt.plot(x_axis.numpy(), current_cdf.numpy(), label=f'Epoch {epoch} Actual')
         
-        # Plot Target Zipf
         if target_cdf is not None:
-             # Resize target to match visualization if needed, or just plot overlay
-             # Target is usually small [16], so we just scatter plot it or interpolate
              t_np = target_cdf.view(-1).cpu().numpy()
              t_x = np.linspace(0, 1, len(t_np))
              plt.plot(t_x, t_np, 'r--', label='Target Zipf', linewidth=2)
@@ -107,6 +101,7 @@ def save_attention_plots(model, loader, device, epoch, args, target_cdf):
         save_path = os.path.join(plot_dir, f"cdf_epoch_{epoch}.png")
         plt.savefig(save_path)
         plt.close()
+        print(f"Saved attention plot to {save_path}")
         
     model.train()
     
