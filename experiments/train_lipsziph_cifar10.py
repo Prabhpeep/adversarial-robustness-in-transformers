@@ -12,9 +12,6 @@ import numpy as np
 from models.lips_ziphreg import LipsFormerSwin
 
 import matplotlib.pyplot as plt
-import os
-import torch
-import numpy as np
 
 # --- LOGGER CLASS (DUAL OUTPUT) ---
 class TeeLogger(object):
@@ -31,77 +28,79 @@ class TeeLogger(object):
         self.terminal.flush()
         self.log.flush()
 
+# --- MODIFIED PLOTTING FUNCTION (Per-Token CDF) ---
 def save_attention_plots(model, loader, device, epoch, args, target_cdf):
     model.eval()
-    
-    # --- FIX: Handle missing 'save_dir' attribute safely ---
-    # Tries to find 'save_dir', then 'output_dir', then defaults to 'logs_experiment'
     base_dir = getattr(args, 'save_dir', getattr(args, 'output_dir', 'logs_experiment'))
     plot_dir = os.path.join(base_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
-    # -------------------------------------------------------
 
     with torch.no_grad():
-        # Get a single batch
-        data, _ = next(iter(loader))
+        try:
+            data, _ = next(iter(loader))
+        except StopIteration:
+            return
         data = data.to(device)
         
-        # Forward pass
-        # Swin vs Standard ViT handling
         try:
-            output, attn_weights = model(data, return_attn=True)
+            _, attn_weights = model(data, return_attn=True)
         except TypeError:
-            # Fallback if model doesn't accept return_attn
-            output = model(data)
-            attn_weights = None
+            return 
 
-        if attn_weights is None:
-            return # Skip if no attention
+        if attn_weights is None: return
 
-        # --- FIX: Handle Variable Sized Attention Maps (Swin) ---
+        # Handle Swin List output (use last layer)
         if isinstance(attn_weights, list):
-            # Check if all layers have the same shape
-            first_shape = attn_weights[0].shape
-            is_uniform = all(a.shape == first_shape for a in attn_weights)
-            
-            if is_uniform:
-                # Standard ViT: concat all layers
-                all_attn = torch.cat(attn_weights, dim=1)
-            else:
-                # Swin/Hierarchical: Shapes mismatch. Use the LAST layer.
-                all_attn = attn_weights[-1]
+            attn = attn_weights[-1] 
         else:
-            all_attn = attn_weights
-        # ---------------------------------------------------------
+            attn = attn_weights
 
-        # Plotting CDF
-        flat_attn = all_attn.cpu().view(-1)
-        sorted_attn, _ = torch.sort(flat_attn, descending=True)
+        # Shape: [Batch, Heads, Query_N, Key_N]
+        # We need to handle 4D (standard) or 3D/variable shapes carefully
+        if attn.dim() == 4:
+            B, H, Q, K = attn.shape
+            # Flatten into [Total_Tokens, Key_Dim] to sort PER TOKEN
+            # We treat every query token across Batch and Heads as an independent observer
+            flat_attn = attn.view(-1, K)
+        else:
+            # Fallback for unexpected shapes
+            flat_attn = attn.view(-1, attn.shape[-1])
         
-        n = len(sorted_attn)
-        x_axis = torch.arange(n) / n
+        # Sort descending per token
+        sorted_attn, _ = torch.sort(flat_attn, dim=-1, descending=True)
         
-        current_cdf = torch.cumsum(sorted_attn, dim=0)
-        current_cdf = current_cdf / current_cdf[-1]
+        # Compute CDF per token
+        current_cdfs = torch.cumsum(sorted_attn, dim=-1)
+        
+        # Average the curves across all tokens (Batch * Heads * Queries)
+        avg_cdf_curve = current_cdfs.mean(dim=0).cpu().numpy()
+        
+        # Normalize (ensure it ends at 1.0)
+        avg_cdf_curve = avg_cdf_curve / (avg_cdf_curve[-1] + 1e-8)
+
+        # Plot
+        n = len(avg_cdf_curve)
+        x_axis = np.linspace(0, 1, n)
 
         plt.figure(figsize=(10, 6))
-        plt.plot(x_axis.numpy(), current_cdf.numpy(), label=f'Epoch {epoch} Actual')
+        plt.plot(x_axis, avg_cdf_curve, label=f'Epoch {epoch} Actual', linewidth=2.5)
         
         if target_cdf is not None:
              t_np = target_cdf.view(-1).cpu().numpy()
-             t_x = np.linspace(0, 1, len(t_np))
-             plt.plot(t_x, t_np, 'r--', label='Target Zipf', linewidth=2)
+             # Interpolate target if dimensions differ (e.g. Swin Window sizes)
+             if len(t_np) != n:
+                 t_x_old = np.linspace(0, 1, len(t_np))
+                 t_np = np.interp(x_axis, t_x_old, t_np)
+             plt.plot(x_axis, t_np, 'r--', label='Target Zipf', linewidth=2)
 
-        plt.title(f'Attention Distribution CDF (Epoch {epoch})')
-        plt.xlabel('Token Rank (Normalized)')
+        plt.title(f'Attention CDF (Epoch {epoch}) - {args.name}')
+        plt.xlabel('Rank')
         plt.ylabel('Cumulative Mass')
         plt.legend()
-        plt.grid(True)
-        
-        save_path = os.path.join(plot_dir, f"cdf_epoch_{epoch}.png")
-        plt.savefig(save_path)
+        plt.grid(True, alpha=0.3)
+        plt.savefig(os.path.join(plot_dir, f"{args.name}_cdf_epoch_{epoch}.png"))
         plt.close()
-        print(f"Saved attention plot to {save_path}")
+        print(f"Saved attention plot to {os.path.join(plot_dir, f'{args.name}_cdf_epoch_{epoch}.png')}")
         
     model.train()
     
@@ -204,7 +203,7 @@ def pgd_attack(model, images, labels, eps=8/255, alpha=2/255, steps=10, device='
     return adv_images
 
 def train(args, model, device, train_loader, optimizer, epoch, criterion, target_cdf, current_lambda):
-    print(f"\n>>> EPOCH {epoch} | Lambda: {args.lambda_reg} | Order: {args.reg_order} | Margin: {args.use_margin} | Noise: {args.use_noise} <<<")
+    print(f"\n>>> EPOCH {epoch} | Lambda: {current_lambda:.4f} | Order: {args.reg_order} | Margin: {args.use_margin} | Noise: {args.use_noise} <<<")
     model.train()
     
     train_loss = 0.0
@@ -216,36 +215,28 @@ def train(args, model, device, train_loader, optimizer, epoch, criterion, target
         data, target = data.to(device), target.to(device)
         
         # === 1. NOISE INJECTION (Backup Strategy) ===
-        # If enabled, train on slightly noisy images to force local stability
         if args.use_noise:
             # Uniform noise in [-8/255, 8/255]
             noise = (torch.rand_like(data) * 2 - 1) * (8/255)
             data = torch.clamp(data + noise, 0, 1)
-        # ============================================
 
         optimizer.zero_grad()
         
         # === 2. FORWARD PASS ===
-        # return_attn=True is crucial: we need raw attention scores for the regularizer
         output, attn_weights = model(data, return_attn=True)
 
         # === 3. TASK LOSS ===
         if args.use_margin:
-            # Combined: CrossEntropy + Lipschitz Margin (ensures gap between class scores)
-            # margin=0.3 is a standard starting point for robust training
             loss_main = criterion(output, target) + lipschitz_margin_loss(output, target, margin=0.3)
         else:
-            # Standard CrossEntropy
             loss_main = criterion(output, target)
 
         # === 4. ZIPFIAN REGULARIZATION ===
-        # We calculate the raw penalty first to log it, then scale by lambda
         raw_reg = torch.tensor(0.0, device=device)
         
-        if args.lambda_reg > 0:
-            # Compute Wasserstein distance (L1 or L2 based on args.reg_order)
+        if current_lambda > 0:
             raw_reg = compute_zipfian_loss(attn_weights, target_cdf, order=args.reg_order)
-            loss = loss_main + (args.lambda_reg * raw_reg)
+            loss = loss_main + (current_lambda * raw_reg)
         else:
             loss = loss_main
 
@@ -261,11 +252,9 @@ def train(args, model, device, train_loader, optimizer, epoch, criterion, target
         correct += pred.eq(target.view_as(pred)).sum().item()
         total += target.size(0)
         
-        # Print status every 100 batches
         if batch_idx % 100 == 0:
             print(f"Batch {batch_idx}: Total Loss {loss.item():.4f} | Reg Raw: {raw_reg.item():.5f} | Task Loss: {loss_main.item():.4f}")
 
-    # End of Epoch Summary
     train_loss /= len(train_loader)
     avg_reg = reg_loss_track / len(train_loader)
     acc = 100. * correct / total
@@ -275,7 +264,6 @@ def train(args, model, device, train_loader, optimizer, epoch, criterion, target
 def test(model, device, test_loader, criterion, pgd_steps=0, desc="Eval", limit_batches=None):
     """
     Evaluates model on Clean and PGD data.
-    limit_batches: If set (e.g., 2), stops after 2 batches to save time (Pulse Check).
     """
     model.eval()
     test_loss = 0
@@ -283,29 +271,23 @@ def test(model, device, test_loader, criterion, pgd_steps=0, desc="Eval", limit_
     correct_pgd = 0
     total = 0
     
-    # Print header without newline so we can append results
     print(f"Running {desc}...", end=" ", flush=True)
     
     for batch_idx, (data, target) in enumerate(test_loader):
-        # --- OPTIMIZATION: BREAK EARLY FOR PULSE CHECKS ---
         if limit_batches is not None and batch_idx >= limit_batches:
             break
-        # ------------------------------------------------
             
         data, target = data.to(device), target.to(device)
         current_batch_size = target.size(0)
         total += current_batch_size
         
-        # 1. Clean Evaluation
         with torch.no_grad():
             output = model(data)
             test_loss += criterion(output, target).item() * current_batch_size
             pred = output.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum().item()
 
-        # 2. PGD Evaluation (Only if requested)
         if pgd_steps > 0:
-            # Generate attacks (gradients are needed here, even in eval mode!)
             adv_data = pgd_attack(model, data, target, 
                                   eps=8/255, alpha=2/255, steps=pgd_steps, device=device)
             
@@ -334,20 +316,24 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output-dir', type=str, default='logs_experiment')
     
-    # --- ARGUMENTS ---
+    # --- EXISTING ARGUMENTS ---
     parser.add_argument('--lambda-reg', type=float, default=0.0)    
     parser.add_argument('--reg-order', type=int, default=1)         
     parser.add_argument('--use-margin', action='store_true')        
     parser.add_argument('--use-noise', action='store_true') 
     parser.add_argument('--warmup-start', type=int, default=5, help='Epoch to start ramping up lambda')
     parser.add_argument('--warmup-epochs', type=int, default=10, help='Epoch to reach full lambda')
+
+    # --- NEW DECAY ARGUMENTS ---
+    parser.add_argument('--lambda-min', type=float, default=0.0, help='Minimum Lambda after decay')
+    parser.add_argument('--decay-start', type=int, default=15, help='Epoch to start decaying lambda')
     
     try:
         args = parser.parse_args()
     except:
         args = parser.parse_args([])
 
-    # --- LOGGER SETUP (REDIRECT PRINT TO FILE) ---
+    # --- LOGGER SETUP ---
     os.makedirs(args.output_dir, exist_ok=True)
     log_file = os.path.join(args.output_dir, f"{args.name}.log")
     sys.stdout = TeeLogger(log_file)
@@ -360,6 +346,7 @@ def main():
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Running on {device} | Experiment: {args.name}")
+    
     # Data
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
@@ -378,7 +365,7 @@ def main():
     testset = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test)
     test_loader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    # --- MODEL INIT (Nano Configuration) ---
+    # --- MODEL INIT (Kept exactly as requested) ---
     model = LipsFormerSwin(
         img_size=32, 
         patch_size=4, 
@@ -402,39 +389,39 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    os.makedirs(args.output_dir, exist_ok=True)
     best_pgd_acc = 0.0
     best_model_path = os.path.join(args.output_dir, f'{args.name}_best.pth')
-    
 
     # --- Training Loop ---
     for epoch in range(1, args.epochs + 1):
         
         # === DYNAMIC LAMBDA SCHEDULER ===
-        # 1. Free Ride Phase: Before 'warmup_start', lambda is 0
+        # 1. Warmup Phase (Standard)
         if epoch < args.warmup_start:
             current_lambda = 0.0
-            
-        # 2. Ramp Phase: Linearly increase until 'warmup_epochs'
         elif epoch < args.warmup_epochs:
-            # Calculate progress (0.0 to 1.0)
             numerator = epoch - args.warmup_start
             denominator = args.warmup_epochs - args.warmup_start
-            # Avoid division by zero if start == end
             progress = numerator / max(denominator, 1) 
             current_lambda = args.lambda_reg * progress
-            
-        # 3. Full Power Phase: Target lambda reached
         else:
             current_lambda = args.lambda_reg
-        # ================================
+            
+        # 2. Linear Decay Logic (Overrides Warmup if applicable)
+        if epoch >= args.decay_start:
+            total_decay_epochs = args.epochs - args.decay_start
+            if total_decay_epochs > 0:
+                decay_progress = (epoch - args.decay_start) / total_decay_epochs
+                # Decay from lambda_reg down to lambda_min
+                current_lambda = args.lambda_reg - decay_progress * (args.lambda_reg - args.lambda_min)
+                current_lambda = max(current_lambda, args.lambda_min)
 
-        print(f"\n>>> EPOCH {epoch} | Lambda: {current_lambda:.4f} (Target: {args.lambda_reg}) | Warmup: {args.warmup_start}-{args.warmup_epochs} <<<")
+        print(f"\n>>> EPOCH {epoch} | Lambda: {current_lambda:.4f} (Target: {args.lambda_reg}) | Decay Start: {args.decay_start} <<<")
 
-        # 1. Train (Pass current_lambda explicitly)
+        # 1. Train
         train(args, model, device, train_loader, optimizer, epoch, criterion, target_cdf, current_lambda)
         
-        # 2. Visualization Strategy
+        # 2. Visualization
         mid_epoch = args.epochs // 2
         if epoch == 1 or epoch == mid_epoch or epoch == args.epochs:
             save_attention_plots(model, test_loader, device, epoch, args, target_cdf)
@@ -454,11 +441,9 @@ def main():
     # --- Final Evaluation (PGD-100) ---
     print("\n\n>>> TRAINING COMPLETE. LOADING BEST MODEL FOR PGD-100... <<<")
     
-    # Load best model if it exists, otherwise use current
     if os.path.exists(best_model_path):
         model.load_state_dict(torch.load(best_model_path))
     
-    # Run Full Test (limit_batches=None)
     test(model, device, test_loader, criterion, pgd_steps=100, desc="FINAL ROBUSTNESS CHECK", limit_batches=None)
 
 if __name__ == '__main__':
