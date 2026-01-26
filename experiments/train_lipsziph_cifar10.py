@@ -203,7 +203,7 @@ def pgd_attack(model, images, labels, eps=8/255, alpha=2/255, steps=10, device='
 
     return adv_images
 
-def train(args, model, device, train_loader, optimizer, epoch, criterion, target_cdf):
+def train(args, model, device, train_loader, optimizer, epoch, criterion, target_cdf, current_lambda):
     print(f"\n>>> EPOCH {epoch} | Lambda: {args.lambda_reg} | Order: {args.reg_order} | Margin: {args.use_margin} | Noise: {args.use_noise} <<<")
     model.train()
     
@@ -338,7 +338,9 @@ def main():
     parser.add_argument('--lambda-reg', type=float, default=0.0)    
     parser.add_argument('--reg-order', type=int, default=1)         
     parser.add_argument('--use-margin', action='store_true')        
-    parser.add_argument('--use-noise', action='store_true')         
+    parser.add_argument('--use-noise', action='store_true') 
+    parser.add_argument('--warmup-start', type=int, default=5, help='Epoch to start ramping up lambda')
+    parser.add_argument('--warmup-epochs', type=int, default=10, help='Epoch to reach full lambda')
     
     try:
         args = parser.parse_args()
@@ -404,29 +406,46 @@ def main():
     best_pgd_acc = 0.0
     best_model_path = os.path.join(args.output_dir, f'{args.name}_best.pth')
     
+
     # --- Training Loop ---
     for epoch in range(1, args.epochs + 1):
-        # 1. Train (Passing target_cdf is CRITICAL)
-        train(args, model, device, train_loader, optimizer, epoch, criterion, target_cdf)
         
-        # ... inside the loop in main() ...
-    
-        # 2. Visualization Strategy: Start, Middle, End
-        # For 30 epochs, this saves at 1, 15, and 30.
+        # === DYNAMIC LAMBDA SCHEDULER ===
+        # 1. Free Ride Phase: Before 'warmup_start', lambda is 0
+        if epoch < args.warmup_start:
+            current_lambda = 0.0
+            
+        # 2. Ramp Phase: Linearly increase until 'warmup_epochs'
+        elif epoch < args.warmup_epochs:
+            # Calculate progress (0.0 to 1.0)
+            numerator = epoch - args.warmup_start
+            denominator = args.warmup_epochs - args.warmup_start
+            # Avoid division by zero if start == end
+            progress = numerator / max(denominator, 1) 
+            current_lambda = args.lambda_reg * progress
+            
+        # 3. Full Power Phase: Target lambda reached
+        else:
+            current_lambda = args.lambda_reg
+        # ================================
+
+        print(f"\n>>> EPOCH {epoch} | Lambda: {current_lambda:.4f} (Target: {args.lambda_reg}) | Warmup: {args.warmup_start}-{args.warmup_epochs} <<<")
+
+        # 1. Train (Pass current_lambda explicitly)
+        train(args, model, device, train_loader, optimizer, epoch, criterion, target_cdf, current_lambda)
+        
+        # 2. Visualization Strategy
         mid_epoch = args.epochs // 2
         if epoch == 1 or epoch == mid_epoch or epoch == args.epochs:
             save_attention_plots(model, test_loader, device, epoch, args, target_cdf)
 
         scheduler.step()
 
-        # 3. Pulse Check Evaluation (Every 5 epochs)
-        # We assume you updated test() to accept limit_batches
+        # 3. Pulse Check Evaluation
         if epoch % 5 == 0 or epoch == args.epochs:
-            # Quick check on 2 batches
             acc, acc_pgd = test(model, device, test_loader, criterion, 
                               pgd_steps=10, desc="Pulse Check", limit_batches=2)
             
-            # Save if it's a good run (Optional, but good for safety)
             if acc_pgd > best_pgd_acc:
                 best_pgd_acc = acc_pgd
                 print(f"--> New Best Pulse PGD: {best_pgd_acc:.2f}% | Saving...")
