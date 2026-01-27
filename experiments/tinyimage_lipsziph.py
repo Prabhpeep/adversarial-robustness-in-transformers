@@ -130,7 +130,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--name', type=str, default='tiny_imgnet_final')
     parser.add_argument('--data-dir', type=str, required=True)
-    parser.add_argument('--batch-size', type=int, default=128) # ADDED
+    parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--epochs', type=int, default=300)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--reg-warmup-start', type=int, default=10)
@@ -140,6 +140,7 @@ def main():
     parser.add_argument('--lambda-min', type=float, default=15.0)
     parser.add_argument('--pulse-batches', type=int, default=40)
     parser.add_argument('--output-dir', type=str, default='logs_tiny_imagenet')
+    parser.add_argument('--resume', action='store_true', help='Resume from checkpoint')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -163,9 +164,21 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     
+    start_epoch = 1
     best_pgd_acc, best_path = 0.0, os.path.join(args.output_dir, f"{args.name}_best_pulse.pth")
+    ckpt_path = os.path.join(args.output_dir, f"{args.name}_checkpoint.pth")
 
-    for epoch in range(1, args.epochs + 1):
+    # --- RESUME LOGIC ---
+    if args.resume and os.path.exists(ckpt_path):
+        print(f"Resuming from checkpoint: {ckpt_path}")
+        checkpoint = torch.load(ckpt_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_pgd_acc = checkpoint.get('best_pgd_acc', 0.0)
+
+    for epoch in range(start_epoch, args.epochs + 1):
         if epoch < args.reg_warmup_start: current_lambda = 0.0
         elif epoch < (args.reg_warmup_start + args.reg_warmup_epochs):
             current_lambda = args.lambda_reg * ((epoch - args.reg_warmup_start) / args.reg_warmup_epochs)
@@ -182,9 +195,19 @@ def main():
             output, attn_weights = model(data, return_attn=True)
             loss = nn.CrossEntropyLoss()(output, target) + (current_lambda * compute_zipfian_loss(attn_weights, target_cdf))
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # GRADIENT CLIPPING
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
         scheduler.step()
+
+        # Save Checkpoint every 10 epochs
+        if epoch % 10 == 0:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_pgd_acc': best_pgd_acc
+            }, ckpt_path)
 
         if epoch % 10 == 0 or (epoch >= args.decay_start and epoch <= args.decay_start + 40 and epoch % 2 == 0):
             save_attention_plots(model, val_loader, device, epoch, args, target_cdf)
