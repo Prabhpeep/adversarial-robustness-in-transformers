@@ -400,22 +400,35 @@ def main():
     torch.save(model.state_dict(), final_model_path)
     print(f"\nTraining Complete. Final model saved to {final_model_path}")
 
-    # --- Final Evaluation (AutoAttack) ---
-    if AUTOATTACK_AVAILABLE:
-        # 1. Evaluate Final Model
-        print("\n\n>>> EVALUATING FINAL MODEL (AutoAttack) <<<")
-        run_autoattack(model, test_loader, device, log_file)
-        
-        # 2. Evaluate Best Pulse Model
-        if os.path.exists(best_model_path):
-            print("\n\n>>> EVALUATING BEST PULSE MODEL (AutoAttack) <<<")
-            model.load_state_dict(torch.load(best_model_path))
-            run_autoattack(model, test_loader, device, log_file)
-    else:
-        print("\nSkipping AutoAttack (not installed). Running PGD-100 on Best Model instead.")
-        if os.path.exists(best_model_path):
-            model.load_state_dict(torch.load(best_model_path))
-        test(model, device, test_loader, criterion, pgd_steps=100, desc="PGD-100 Check", limit_batches=None)
+    # --- Final Evaluation Suite ---
+    checkpoints_to_test = [
+        ("FINAL MODEL", final_model_path),
+        ("BEST PULSE MODEL", best_model_path)
+    ]
 
+    for label, path in checkpoints_to_test:
+        if os.path.exists(path):
+            print("\n" + "="*60)
+            print(f" EVALUATING: {label}")
+            print("="*60)
+            
+            # Load weights
+            model.load_state_dict(torch.load(path))
+            model.eval()
+
+            # 1. PGD-100 (The "Reliable" Check)
+            print(f"\n[1/2] Running PGD-100 on {label}...")
+            test(model, device, test_loader, criterion, pgd_steps=100, desc=f"PGD-100 ({label})")
+
+            # 2. AutoAttack (The "Brutal" Check)
+            if AUTOATTACK_AVAILABLE:
+                print(f"\n[2/2] Running AutoAttack on {label}...")
+                # Note: run_autoattack handles its own prints/logging
+                run_autoattack(model, test_loader, device, log_file)
+            else:
+                print(f"\n[2/2] AutoAttack skipped (not installed).")
+        else:
+            print(f"\nWarning: Checkpoint not found at {path}")
+            
 if __name__ == '__main__':
     main()
