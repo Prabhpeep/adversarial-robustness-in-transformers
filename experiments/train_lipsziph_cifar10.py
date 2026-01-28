@@ -178,6 +178,8 @@ def train(args, model, device, train_loader, optimizer, epoch, criterion, target
             # Get grads for Task Loss only
             if args.target_ratio == 0.0:
                  current_lambda = 0.0
+                 norm_main = 0.0 
+                 norm_reg = 0.0
             else:
                 grad_main = torch.autograd.grad(loss_main, model.parameters(), retain_graph=True, allow_unused=True)
                 norm_main = torch.norm(torch.stack([torch.norm(g.detach(), 2) for g in grad_main if g is not None]), 2)
