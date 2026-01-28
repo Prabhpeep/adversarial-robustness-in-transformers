@@ -176,17 +176,20 @@ def train(args, model, device, train_loader, optimizer, epoch, criterion, target
         # 4. Dynamic Lambda Calibration (Every 50 batches to save compute)
         if batch_idx % 50 == 0:
             # Get grads for Task Loss only
-            grad_main = torch.autograd.grad(loss_main, model.parameters(), retain_graph=True, allow_unused=True)
-            norm_main = torch.norm(torch.stack([torch.norm(g.detach(), 2) for g in grad_main if g is not None]), 2)
-
-            # Get grads for Reg Loss only
-            grad_reg = torch.autograd.grad(raw_reg, model.parameters(), retain_graph=True, allow_unused=True)
-            norm_reg = torch.norm(torch.stack([torch.norm(g.detach(), 2) for g in grad_reg if g is not None]), 2)
-
-            # Update lambda: current_lambda * norm_reg should = norm_main * target_ratio
-            if norm_reg > 1e-8:
-                ideal_lambda = (norm_main * target_ratio) / norm_reg
-                # Use a momentum-style update to prevent lambda spikes
+            if args.target_ratio == 0.0:
+                 current_lambda = 0.0
+            else:
+                grad_main = torch.autograd.grad(loss_main, model.parameters(), retain_graph=True, allow_unused=True)
+                norm_main = torch.norm(torch.stack([torch.norm(g.detach(), 2) for g in grad_main if g is not None]), 2)
+    
+                # Get grads for Reg Loss only
+                grad_reg = torch.autograd.grad(raw_reg, model.parameters(), retain_graph=True, allow_unused=True)
+                norm_reg = torch.norm(torch.stack([torch.norm(g.detach(), 2) for g in grad_reg if g is not None]), 2)
+    
+                # Update lambda: current_lambda * norm_reg should = norm_main * target_ratio
+                if norm_reg > 1e-8:
+                    ideal_lambda = (norm_main * target_ratio) / norm_reg
+                    # Use a momentum-style update to prevent lambda spikes
                 current_lambda = 0.9 * current_lambda + 0.1 * ideal_lambda.item()
 
         # 5. Final Combined Loss
