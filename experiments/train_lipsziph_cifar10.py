@@ -149,54 +149,59 @@ def pgd_attack(model, images, labels, eps=8/255, alpha=2/255, steps=10, device='
 
     return adv_images
 
-def train(args, model, device, train_loader, optimizer, epoch, criterion, target_cdf, current_lambda):
-    print(f"\n>>> EPOCH {epoch} | Lambda: {current_lambda:.4f} | Order: {args.reg_order} | Margin: {args.use_margin} <<<")
+def train(args, model, device, train_loader, optimizer, epoch, criterion, target_cdf, target_ratio=0.1):
+    print(f"\n>>> EPOCH {epoch} | Dynamic Balancing (Target: {target_ratio*100}%) <<<")
     model.train()
     
     train_loss = 0.0
     reg_loss_track = 0.0
-    correct = 0
-    total = 0
-
+    # Start with the user-provided lambda as a baseline
+    current_lambda = args.lambda_reg 
+    
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
-        
-        if args.use_noise:
-            noise = (torch.rand_like(data) * 2 - 1) * (8/255)
-            data = torch.clamp(data + noise, 0, 1)
-
         optimizer.zero_grad()
+        
+        # 1. Forward Pass
         output, attn_weights = model(data, return_attn=True)
-
+        
+        # 2. Compute Task Loss (Main)
+        loss_main = criterion(output, target)
         if args.use_margin:
-            loss_main = criterion(output, target) + lipschitz_margin_loss(output, target, margin=0.3)
-        else:
-            loss_main = criterion(output, target)
+            loss_main += lipschitz_margin_loss(output, target, margin=0.3)
 
-        raw_reg = torch.tensor(0.0, device=device)
-        if current_lambda > 0:
-            raw_reg = compute_zipfian_loss(attn_weights, target_cdf, order=args.reg_order)
-            loss = loss_main + (current_lambda * raw_reg)
-        else:
-            loss = loss_main
+        # 3. Compute Regularization Loss (Zipf)
+        raw_reg = compute_zipfian_loss(attn_weights, target_cdf, order=args.reg_order)
 
-        loss.backward()
+        # 4. Dynamic Lambda Calibration (Every 50 batches to save compute)
+        if batch_idx % 50 == 0:
+            # Get grads for Task Loss only
+            grad_main = torch.autograd.grad(loss_main, model.parameters(), retain_graph=True, allow_unused=True)
+            norm_main = torch.norm(torch.stack([torch.norm(g.detach(), 2) for g in grad_main if g is not None]), 2)
+
+            # Get grads for Reg Loss only
+            grad_reg = torch.autograd.grad(raw_reg, model.parameters(), retain_graph=True, allow_unused=True)
+            norm_reg = torch.norm(torch.stack([torch.norm(g.detach(), 2) for g in grad_reg if g is not None]), 2)
+
+            # Update lambda: current_lambda * norm_reg should = norm_main * target_ratio
+            if norm_reg > 1e-8:
+                ideal_lambda = (norm_main * target_ratio) / norm_reg
+                # Use a momentum-style update to prevent lambda spikes
+                current_lambda = 0.9 * current_lambda + 0.1 * ideal_lambda.item()
+
+        # 5. Final Combined Loss
+        total_loss = loss_main + (current_lambda * raw_reg)
+        total_loss.backward()
         optimizer.step()
 
-        train_loss += loss.item()
+        # Tracking
+        train_loss += total_loss.item()
         reg_loss_track += raw_reg.item()
         
-        pred = output.argmax(dim=1, keepdim=True)
-        correct += pred.eq(target.view_as(pred)).sum().item()
-        total += target.size(0)
-        
         if batch_idx % 100 == 0:
-            print(f"Batch {batch_idx}: Total Loss {loss.item():.4f} | Reg Raw: {raw_reg.item():.5f} | Task: {loss_main.item():.4f}")
+            print(f"Batch {batch_idx}: Lambda {current_lambda:.4f} | Task Norm: {norm_main:.4f} | Reg Norm: {norm_reg:.4f}")
 
-    train_loss /= len(train_loader)
-    avg_reg = reg_loss_track / len(train_loader)
-    acc = 100. * correct / total
-    print(f"Train End: Avg Loss: {train_loss:.4f} | Avg Reg: {avg_reg:.5f} | Acc: {acc:.2f}%")
+    print(f"Train End: Avg Loss: {train_loss/len(train_loader):.4f} | Final Lambda: {current_lambda:.4f}")
 
 def test(model, device, test_loader, criterion, pgd_steps=0, desc="Eval", limit_batches=None):
     model.eval()
@@ -284,8 +289,9 @@ def main():
     parser.add_argument('--use-noise', action='store_true') 
 
     # --- NEW ARGUMENTS ---
-    parser.add_argument('--lambda-min', type=float, default=5.0, help='Minimum Lambda after decay')
-    parser.add_argument('--decay-start', type=int, default=15, help='Epoch to start decaying lambda')
+    # Replace the NEW ARGUMENTS section in main():
+    parser.add_argument('--target-ratio', type=float, default=0.1, 
+                    help='Target ratio of Reg Grad Norm vs Task Grad Norm')
     parser.add_argument('--pulse-batches', type=int, default=10, help='Number of batches for PGD Pulse')
     
     try:
