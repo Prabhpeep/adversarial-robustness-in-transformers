@@ -279,25 +279,21 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--name', type=str, default='experiment')
     parser.add_argument('--batch-size', type=int, default=128)
-    parser.add_argument('--epochs', type=int, default=50) # Increased default slightly for CIFAR100
+    parser.add_argument('--epochs', type=int, default=50) 
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output-dir', type=str, default='logs_experiment')
-    parser.add_argument('--lambda-reg', type=float, default=0.0)    
+    parser.add_argument('--lambda-reg', type=float, default=1.0) # Initial baseline
     parser.add_argument('--reg-order', type=int, default=1)         
     parser.add_argument('--use-margin', action='store_true')        
     parser.add_argument('--use-noise', action='store_true') 
 
-    # --- NEW ARGUMENTS ---
-    # Replace the NEW ARGUMENTS section in main():
+    # --- UPDATED ARGUMENTS ---
     parser.add_argument('--target-ratio', type=float, default=0.1, 
                     help='Target ratio of Reg Grad Norm vs Task Grad Norm')
-    parser.add_argument('--pulse-batches', type=int, default=10, help='Number of batches for PGD Pulse')
+    parser.add_argument('--pulse-batches', type=int, default=10, help='Batches for PGD Pulse')
     
-    try:
-        args = parser.parse_args()
-    except:
-        args = parser.parse_args([])
+    args = parser.parse_args()
 
     # Logger Setup
     os.makedirs(args.output_dir, exist_ok=True)
@@ -306,7 +302,7 @@ def main():
     
     print(f"======================================================")
     print(f" STARTING EXPERIMENT (CIFAR-100): {args.name}")
-    print(f" Strategy: Shape & Decay | Start Decay: {args.decay_start}")
+    print(f" Strategy: Dynamic Gradient Balancing | Ratio: {args.target_ratio}")
     print(f"======================================================")
     
     torch.manual_seed(args.seed)
@@ -317,7 +313,7 @@ def main():
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)), # CIFAR100 Mean/Std
+        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)), 
     ])
     transform_test = transforms.Compose([
         transforms.ToTensor(),
@@ -331,18 +327,17 @@ def main():
         datasets.CIFAR100('../data', train=False, transform=transform_test), 
         batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-
-# Model - Optimized for CIFAR-100
+    # Model - Swin-Tiny Optimized for CIFAR-100
     model = LipsFormerSwin(
         img_size=32, 
         patch_size=4, 
         in_chans=3, 
         num_classes=100,
         embed_dim=96,           
-        depths=[2, 2, 6, 2],    # INCREASED: From [2,2,2,2] to [2,2,6,2]
-        num_heads=[3, 6, 12, 24], # SCALED: Standard head scaling for Swin
+        depths=[2, 2, 6, 2],    
+        num_heads=[3, 6, 12, 24], 
         window_size=4,          
-        mlp_ratio=4.            # INCREASED: From 2.0 to 4.0 for capacity
+        mlp_ratio=4.            
     ).to(device)
 
     # Pre-calculate Target CDF
@@ -363,32 +358,22 @@ def main():
     # --- Training Loop ---
     for epoch in range(1, args.epochs + 1):
         
-        # --- Linear Decay Logic (Shape & Decay) ---
-        current_lambda = args.lambda_reg # Default to initial High Lambda (Shape phase)
+        # CORRECTED CALL: Pass args.target_ratio, NOT current_lambda
+        train(args, model, device, train_loader, optimizer, epoch, criterion, target_cdf, target_ratio=args.target_ratio)
         
-        if epoch >= args.decay_start:
-            total_decay_epochs = args.epochs - args.decay_start
-            if total_decay_epochs > 0:
-                decay_progress = (epoch - args.decay_start) / total_decay_epochs
-                # Decay from lambda_reg down to lambda_min
-                current_lambda = args.lambda_reg - decay_progress * (args.lambda_reg - args.lambda_min)
-                current_lambda = max(current_lambda, args.lambda_min)
-        # ------------------------------------------
-
-        train(args, model, device, train_loader, optimizer, epoch, criterion, target_cdf, current_lambda)
-        
-        # Visualization
+        # Visualization (Wrapped in try/except so it doesn't crash the run)
         mid_epoch = args.epochs // 2
         if epoch == 1 or epoch == mid_epoch or epoch == args.epochs:
-            save_attention_plots(model, test_loader, device, epoch, args, target_cdf)
+            try:
+                save_attention_plots(model, test_loader, device, epoch, args, target_cdf)
+            except Exception as e:
+                print(f"Warning: Plotting failed ({e}), continuing training...")
 
         scheduler.step()
 
         # --- Pulse Check Evaluation ---
-        # Check every 5 epochs, OR every 2 epochs during the critical decay phase (15-45 approx)
-        is_critical_phase = (epoch >= args.decay_start and epoch <= (args.decay_start + 30))
-        
-        if epoch % 5 == 0 or (is_critical_phase and epoch % 2 == 0) or epoch == args.epochs:
+        # Check every 5 epochs, or every 2 epochs during mid-training
+        if epoch % 5 == 0 or (epoch > 15 and epoch < 45 and epoch % 2 == 0) or epoch == args.epochs:
             acc, acc_pgd = test(model, device, test_loader, criterion, 
                               pgd_steps=10, desc="Pulse Check", limit_batches=args.pulse_batches)
             
@@ -413,23 +398,22 @@ def main():
             print(f" EVALUATING: {label}")
             print("="*60)
             
-            # Load weights
             model.load_state_dict(torch.load(path))
             model.eval()
 
-            # 1. PGD-100 (The "Reliable" Check)
+            # 1. PGD-100
             print(f"\n[1/2] Running PGD-100 on {label}...")
             test(model, device, test_loader, criterion, pgd_steps=100, desc=f"PGD-100 ({label})")
 
-            # 2. AutoAttack (The "Brutal" Check)
+            # 2. AutoAttack
             if AUTOATTACK_AVAILABLE:
                 print(f"\n[2/2] Running AutoAttack on {label}...")
-                # Note: run_autoattack handles its own prints/logging
                 run_autoattack(model, test_loader, device, log_file)
             else:
                 print(f"\n[2/2] AutoAttack skipped (not installed).")
         else:
             print(f"\nWarning: Checkpoint not found at {path}")
-            
+
+
 if __name__ == '__main__':
     main()
