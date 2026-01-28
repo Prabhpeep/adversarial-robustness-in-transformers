@@ -331,17 +331,18 @@ def main():
         datasets.CIFAR100('../data', train=False, transform=transform_test), 
         batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    # Model - CIFAR100 (num_classes=100)
+
+# Model - Optimized for CIFAR-100
     model = LipsFormerSwin(
         img_size=32, 
         patch_size=4, 
         in_chans=3, 
-        num_classes=100, # CHANGED
+        num_classes=100,
         embed_dim=96,           
-        depths=[2, 2, 2, 2],    
-        num_heads=[3, 3, 3, 3], 
+        depths=[2, 2, 6, 2],    # INCREASED: From [2,2,2,2] to [2,2,6,2]
+        num_heads=[3, 6, 12, 24], # SCALED: Standard head scaling for Swin
         window_size=4,          
-        mlp_ratio=2.            
+        mlp_ratio=4.            # INCREASED: From 2.0 to 4.0 for capacity
     ).to(device)
 
     # Pre-calculate Target CDF
