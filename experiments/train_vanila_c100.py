@@ -356,6 +356,7 @@ def main():
         batch_size=args.batch_size, shuffle=False, num_workers=2)
 
     # Vanilla ViT-Tiny configuration for CIFAR-100 (32x32)
+# Vanilla ViT-Tiny configuration for CIFAR-100 (32x32)
     config = ViTConfig(
         image_size=32, 
         patch_size=4, 
@@ -363,7 +364,8 @@ def main():
         num_labels=100,
         hidden_size=192, 
         num_hidden_layers=12, 
-        num_attention_heads=3
+        num_attention_heads=3,
+        attn_implementation="eager"  # <-- THIS FORCES THE MODEL TO RETURN ATTENTION WEIGHTS
     )
     model = ViTForImageClassification(config).to(device)
 
