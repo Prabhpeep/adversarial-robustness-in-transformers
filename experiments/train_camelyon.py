@@ -27,6 +27,7 @@ except ImportError:
     print("Warning: AutoAttack not installed. Final robust evaluation will be skipped.")
 
 # --- LOGGER CLASS ---
+# --- LOGGER CLASS ---
 class TeeLogger(object):
     def __init__(self, filename):
         self.terminal = sys.stdout
@@ -40,7 +41,10 @@ class TeeLogger(object):
     def flush(self):
         self.terminal.flush()
         self.log.flush()
-
+        
+    # ADD THIS METHOD TO FIX THE HUGGINGFACE CRASH
+    def isatty(self):
+        return False
 # ------------------------------------------------------------------------------
 # 1. Plotting Utility
 # ------------------------------------------------------------------------------
