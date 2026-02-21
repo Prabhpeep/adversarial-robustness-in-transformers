@@ -14,8 +14,6 @@ import csv
 
 # HuggingFace Imports for Vanilla ViT
 from transformers import ViTConfig, ViTForImageClassification
-from wilds import get_dataset
-from wilds.common.data_loaders import get_train_loader, get_eval_loader
 import torchvision.transforms as transforms
 
 # Attempt to import AutoAttack (ensure 'pip install autoattack' is run)
