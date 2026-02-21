@@ -176,7 +176,7 @@ def train(args, model, device, train_loader, optimizer, epoch, criterion, target
     reg_loss_track = 0.0
     current_lambda = args.lambda_reg 
     
-    for batch_idx, (data, target) in enumerate(train_loader):
+    for batch_idx, (data, target, metadata) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
         
@@ -227,16 +227,21 @@ def train(args, model, device, train_loader, optimizer, epoch, criterion, target
 
     print(f"Train End: Avg Loss: {train_loss/len(train_loader):.4f} | Final Lambda: {current_lambda:.4f}")
 
-def test(model, device, test_loader, criterion, pgd_steps=0, desc="Eval", limit_batches=None):
+def test(model, device, test_loader, dataset, criterion, pgd_steps=0, desc="Eval", limit_batches=None):
     model.eval()
     test_loss = 0
-    correct = 0
-    correct_pgd = 0
     total = 0
+    
+    # WILDS requires us to collect all predictions, truths, and metadata
+    all_y_true = []
+    all_y_pred = []
+    all_metadata = []
+    all_y_pred_adv = [] # For PGD tracking
     
     print(f"Running {desc}...", end=" ", flush=True)
     
-    for batch_idx, (data, target) in enumerate(test_loader):
+    # Notice the loader yields 3 items now: data, target, metadata
+    for batch_idx, (data, target, metadata) in enumerate(test_loader):
         if limit_batches is not None and batch_idx >= limit_batches:
             break
             
@@ -244,28 +249,48 @@ def test(model, device, test_loader, criterion, pgd_steps=0, desc="Eval", limit_
         current_batch_size = target.size(0)
         total += current_batch_size
         
+        # --- Clean Evaluation ---
         with torch.no_grad():
             outputs = model(data)
-            output = outputs.logits # Fixed: extract logits
+            output = outputs.logits
             test_loss += criterion(output, target).item() * current_batch_size
-            pred = output.argmax(dim=1, keepdim=True)
-            correct += pred.eq(target.view_as(pred)).sum().item()
+            pred = output.argmax(dim=1)
+            
+            # Move to CPU to prevent GPU OOM before concatenating
+            all_y_true.append(target.cpu())
+            all_y_pred.append(pred.cpu())
+            all_metadata.append(metadata.cpu())
 
+        # --- Adversarial Evaluation (PGD) ---
         if pgd_steps > 0:
             adv_data = pgd_attack(model, data, target, eps=8/255, alpha=2/255, steps=pgd_steps, device=device)
             with torch.no_grad():
-                output_adv = model(adv_data).logits # Fixed: extract logits
-                pred_adv = output_adv.argmax(dim=1, keepdim=True)
-                correct_pgd += pred_adv.eq(target.view_as(pred_adv)).sum().item()
+                output_adv = model(adv_data).logits
+                pred_adv = output_adv.argmax(dim=1)
+                all_y_pred_adv.append(pred_adv.cpu())
 
-    acc = 100. * correct / total
+    # Concatenate all batches for WILDS Evaluation
+    all_y_true = torch.cat(all_y_true)
+    all_y_pred = torch.cat(all_y_pred)
+    all_metadata = torch.cat(all_metadata)
+    
+    # The dataset.eval() function returns a tuple: (metrics_dict, metrics_string_summary)
+    clean_metrics, clean_str = dataset.eval(all_y_pred, all_y_true, all_metadata)
+    print(f"\n[Clean Results] {clean_str}")
+    
+    # We extract the Macro F1 score to use for saving our best checkpoints
+    # FMoW uses 'adj_macro_f1' or 'F1-macro_all' depending on the exact WILDS version
+    clean_f1 = clean_metrics.get('adj_macro_f1', clean_metrics.get('F1-macro_all', 0.0))
+    
+    adv_f1 = 0.0
     if pgd_steps > 0:
-        acc_pgd = 100. * correct_pgd / total
-        print(f"| Clean: {acc:.2f}% | PGD-{pgd_steps}: {acc_pgd:.2f}% ({total} images)")
-        return acc, acc_pgd
-    else:
-        print(f"| Clean: {acc:.2f}% ({total} images)")
-        return acc, 0.0
+        all_y_pred_adv = torch.cat(all_y_pred_adv)
+        adv_metrics, adv_str = dataset.eval(all_y_pred_adv, all_y_true, all_metadata)
+        print(f"[PGD-{pgd_steps} Results] {adv_str}")
+        adv_f1 = adv_metrics.get('adj_macro_f1', adv_metrics.get('F1-macro_all', 0.0))
+        
+    # Return the F1 scores instead of raw accuracy
+    return clean_f1, adv_f1
 
 # --- WRAPPER FOR AUTOATTACK ---
 class HuggingFaceWrapper(nn.Module):
@@ -289,7 +314,9 @@ def run_autoattack(model, test_loader, device, log_file):
     # Collect all test data
     all_imgs = []
     all_lbls = []
-    for data, target in test_loader:
+    for batch_idx, (data, target, metadata) in enumerate(test_loader):
+        if batch_idx >= 5: # Only run AA on the first 5 batches
+            break
         all_imgs.append(data)
         all_lbls.append(target)
     
@@ -399,15 +426,17 @@ def main():
         scheduler.step()
 
         # --- Pulse Check Evaluation ---
-        if epoch % 5 == 0 or (epoch > 15 and epoch < 45 and epoch % 2 == 0) or epoch == args.epochs:
-            acc, acc_pgd = test(model, device, test_loader, criterion, 
+        # Check every 5 epochs, etc...
+        if epoch % 5 == 0 or epoch == args.epochs:
+            # Pass `dataset` to the test function
+            clean_f1, adv_f1 = test(model, device, test_loader, dataset, criterion, 
                               pgd_steps=10, desc="Pulse Check", limit_batches=args.pulse_batches)
             
-            if acc_pgd > best_pgd_acc:
-                best_pgd_acc = acc_pgd
-                print(f"--> New Best Pulse PGD: {best_pgd_acc:.2f}% | Saving...")
+            # Track the Best PGD F1 Score
+            if adv_f1 > best_pgd_acc:
+                best_pgd_acc = adv_f1
+                print(f"--> New Best Pulse PGD F1: {best_pgd_acc:.4f} | Saving...")
                 torch.save(model.state_dict(), best_model_path)
-
     # --- Save Final Model ---
     torch.save(model.state_dict(), final_model_path)
     print(f"\nTraining Complete. Final model saved to {final_model_path}")
@@ -428,8 +457,7 @@ def main():
             model.eval()
 
             print(f"\n[1/2] Running PGD-100 on {label}...")
-            test(model, device, test_loader, criterion, pgd_steps=100, desc=f"PGD-100 ({label})")
-
+            test(model, device, test_loader, dataset, criterion, pgd_steps=100, desc=f"PGD-100 ({label})", limit_batches=5)
             if AUTOATTACK_AVAILABLE:
                 print(f"\n[2/2] Running AutoAttack on {label}...")
                 run_autoattack(model, test_loader, device, log_file)
