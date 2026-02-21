@@ -334,6 +334,10 @@ def main():
         attn_implementation="eager", # Crucial for SAAR
         output_attentions=True
     ).to(device)
+
+    if torch.cuda.device_count() > 1:
+        print(f"Let's use {torch.cuda.device_count()} GPUs!")
+        model = nn.DataParallel(model)
     
     # Update Sequence Length for the new 224x224 resolution
     # 224/16 = 14 patches per side -> 14*14 = 196 + 1 CLS token = 197
