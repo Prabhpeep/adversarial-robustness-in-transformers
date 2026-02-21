@@ -100,8 +100,8 @@ def pgd_attack(model, images, labels, eps=8/255, alpha=2/255, steps=10, device='
 
     for _ in range(steps):
         adv_images.requires_grad = True
-        outputs = model(adv_images)
-        loss = loss_fn(outputs.logits, labels) # Fixed: extract logits
+        outputs = model(adv_images, return_dict=False)
+        loss = loss_fn(outputs[0], labels) # Fixed: extract logits
         grad = torch.autograd.grad(loss, adv_images)[0]
         adv_images = adv_images.detach() + alpha * grad.sign()
         delta = torch.clamp(adv_images - images, -eps, eps)
@@ -122,9 +122,9 @@ def train(args, model, device, train_loader, optimizer, epoch, criterion, target
         optimizer.zero_grad()
         
         # 1. Forward Pass (HuggingFace)
-        outputs = model(data, output_attentions=True)
-        output = outputs.logits
-        attn_weights = outputs.attentions 
+        outputs = model(data, output_attentions=True, return_dict=False)
+        output = outputs[0]
+        attn_weights = outputs[-1] 
                 
         # 2. Compute Task Loss (Main)
         loss_main = criterion(output, target)
@@ -192,8 +192,8 @@ def test(model, device, test_loader, dataset, criterion, pgd_steps=0, desc="Eval
         
         # --- Clean Evaluation ---
         with torch.no_grad():
-            outputs = model(data)
-            output = outputs.logits
+            outputs = model(data, return_dict=False)
+            output = outputs[0]
             test_loss += criterion(output, target).item() * current_batch_size
             pred = output.argmax(dim=1)
             
@@ -216,22 +216,22 @@ def test(model, device, test_loader, dataset, criterion, pgd_steps=0, desc="Eval
     all_metadata = torch.cat(all_metadata)
     
     # The dataset.eval() function returns a tuple: (metrics_dict, metrics_string_summary)
+    # The dataset.eval() function returns a tuple: (metrics_dict, metrics_string_summary)
     clean_metrics, clean_str = dataset.eval(all_y_pred, all_y_true, all_metadata)
     print(f"\n[Clean Results] {clean_str}")
     
-    # We extract the Macro F1 score to use for saving our best checkpoints
-    # FMoW uses 'adj_macro_f1' or 'F1-macro_all' depending on the exact WILDS version
-    clean_f1 = clean_metrics.get('adj_macro_f1', clean_metrics.get('F1-macro_all', 0.0))
+    # Extract Average Accuracy for Camelyon17
+    clean_acc = clean_metrics.get('acc_avg', 0.0)
     
-    adv_f1 = 0.0
+    adv_acc = 0.0
     if pgd_steps > 0:
         all_y_pred_adv = torch.cat(all_y_pred_adv)
         adv_metrics, adv_str = dataset.eval(all_y_pred_adv, all_y_true, all_metadata)
         print(f"[PGD-{pgd_steps} Results] {adv_str}")
-        adv_f1 = adv_metrics.get('adj_macro_f1', adv_metrics.get('F1-macro_all', 0.0))
+        adv_acc = adv_metrics.get('acc_avg', 0.0)
         
-    # Return the F1 scores instead of raw accuracy
-    return clean_f1, adv_f1
+    # Return the accuracies
+    return clean_acc, adv_acc
 
 # --- WRAPPER FOR AUTOATTACK ---
 class HuggingFaceWrapper(nn.Module):
@@ -240,7 +240,7 @@ class HuggingFaceWrapper(nn.Module):
         super().__init__()
         self.model = model
     def forward(self, x):
-        return self.model(x).logits
+        return self.model(x, return_dict=False)[0]
 
 def run_autoattack(model, test_loader, device, log_file):
     if not AUTOATTACK_AVAILABLE:
@@ -307,10 +307,10 @@ def main():
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # 1. Load FMoW Dataset
-    dataset = get_dataset(dataset="fmow", download=True)
+   # 1. Load Camelyon17 Dataset (Fits in Kaggle's 20GB limit!)
+    dataset = get_dataset(dataset="camelyon17", download=True)
     
-    # 2. Standard ViT Transforms (Resize to 224x224)
+    # 2. Standard ViT Transforms (Resize 96x96 to 224x224)
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
@@ -319,17 +319,15 @@ def main():
     
     # 3. Get the OOD Splits
     train_data = dataset.get_subset("train", transform=transform)
-    val_ood_data = dataset.get_subset("val", transform=transform) # OOD Validation
-    test_ood_data = dataset.get_subset("test", transform=transform) # OOD Test
+    test_ood_data = dataset.get_subset("test", transform=transform) # OOD Unseen Hospital
     
     train_loader = get_train_loader("standard", train_data, batch_size=args.batch_size)
     test_loader = get_eval_loader("standard", test_ood_data, batch_size=args.batch_size)
-
     # Load the highly discriminative pre-trained ViT
-    # FMoW has 62 classes
+
     model = ViTForImageClassification.from_pretrained(
         'google/vit-base-patch16-224-in21k', 
-        num_labels=62, 
+        num_labels=2, 
         ignore_mismatched_sizes=True, 
         attn_implementation="eager", # Crucial for SAAR
         output_attentions=True
@@ -367,12 +365,12 @@ def main():
         # Check every 5 epochs, etc...
         if epoch % 5 == 0 or epoch == args.epochs:
             # Pass `dataset` to the test function
-            clean_f1, adv_f1 = test(model, device, test_loader, dataset, criterion, 
+            clean_acc, adv_acc = test(model, device, test_loader, dataset, criterion, 
                               pgd_steps=10, desc="Pulse Check", limit_batches=args.pulse_batches)
             
             # Track the Best PGD F1 Score
-            if adv_f1 > best_pgd_acc:
-                best_pgd_acc = adv_f1
+            if adv_acc > best_pgd_acc:
+                best_pgd_acc = adv_acc
                 print(f"--> New Best Pulse PGD F1: {best_pgd_acc:.4f} | Saving...")
                 torch.save(model.state_dict(), best_model_path)
     # --- Save Final Model ---
