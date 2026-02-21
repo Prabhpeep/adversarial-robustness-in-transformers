@@ -41,67 +41,8 @@ class TeeLogger(object):
         self.terminal.flush()
         self.log.flush()
 
-# ------------------------------------------------------------------------------
-# 1. Plotting Utility
-# ------------------------------------------------------------------------------
-def save_attention_plots(model, loader, device, epoch, args, target_cdf):
-    model.eval()
-    base_dir = getattr(args, 'save_dir', getattr(args, 'output_dir', 'logs_experiment'))
-    plot_dir = os.path.join(base_dir, "plots")
-    os.makedirs(plot_dir, exist_ok=True)
 
-    with torch.no_grad():
-        try:
-            data, _ = next(iter(loader))
-        except StopIteration:
-            return
-        data = data.to(device)
-        
-        try:
-            # HuggingFace forward pass
-            outputs = model(data, output_attentions=True)
-            attn_weights = outputs.attentions
-        except TypeError:
-            return 
 
-        if attn_weights is None: return
-
-        # Get the attention from the final layer
-        if isinstance(attn_weights, tuple) or isinstance(attn_weights, list): 
-            attn = attn_weights[-1] 
-        else: 
-            attn = attn_weights
-
-        # Flatten [B, H, Q, K] -> [Total_Queries, K]
-        B, H, Q, K = attn.shape
-        flat_attn = attn.view(-1, K)
-        
-        # Sort & CDF per query over keys
-        sorted_attn, _ = torch.sort(flat_attn, dim=-1, descending=True)
-        current_cdfs = torch.cumsum(sorted_attn, dim=-1)
-        
-        # Average
-        avg_cdf_curve = current_cdfs.mean(dim=0).cpu().numpy()
-        avg_cdf_curve = avg_cdf_curve / (avg_cdf_curve[-1] + 1e-8)
-
-        # Plot
-        n = len(avg_cdf_curve)
-        x_axis = np.linspace(0, 1, n)
-        plt.figure(figsize=(10, 6))
-        plt.plot(x_axis, avg_cdf_curve, label=f'Epoch {epoch} Actual', linewidth=2.5)
-        if target_cdf is not None:
-             t_np = target_cdf.view(-1).cpu().numpy()
-             if len(t_np) != n:
-                 t_x_old = np.linspace(0, 1, len(t_np))
-                 t_np = np.interp(x_axis, t_x_old, t_np)
-             plt.plot(x_axis, t_np, 'r--', label='Target Zipf', linewidth=2)
-
-        plt.title(f'Attention CDF (Epoch {epoch}) - {args.name}')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.savefig(os.path.join(plot_dir, f"{args.name}_cdf_epoch_{epoch}.png"))
-        plt.close()
-    model.train()
 
 # ------------------------------------------------------------------------------
 # 2. Loss & Helper Functions
@@ -415,14 +356,7 @@ def main():
         
         train(args, model, device, train_loader, optimizer, epoch, criterion, target_cdf, target_ratio=args.target_ratio)
         
-        # Visualization
-        mid_epoch = args.epochs // 2
-        if epoch == 1 or epoch == mid_epoch or epoch == args.epochs:
-            try:
-                save_attention_plots(model, test_loader, device, epoch, args, target_cdf)
-            except Exception as e:
-                print(f"Warning: Plotting failed ({e}), continuing training...")
-
+       
         scheduler.step()
 
         # --- Pulse Check Evaluation ---
