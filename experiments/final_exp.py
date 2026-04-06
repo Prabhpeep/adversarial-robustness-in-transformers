@@ -55,9 +55,18 @@ class AttentionGeometryLoss(nn.Module):
         super().__init__()
 
     def extract_cls_attention(self, attn_weights):
-        return attn_weights[:, :, 0, 1:]
+        """
+        Isolates [CLS] token's query to image patch keys and projects 
+        it back onto the probability simplex.
+        """
+        # Slice out the CLS token's attention to the image patches
+        cls_attn = attn_weights[:, :, 0, 1:]
+        
+        # CRITICAL FIX: Re-normalize so the patch probabilities sum to 1.0
+        return cls_attn / (cls_attn.sum(dim=-1, keepdim=True) + 1e-9)
 
     def compute_entropy(self, cls_attn):
+        # cls_attn is now guaranteed to be a valid probability distribution
         p = torch.clamp(cls_attn, min=1e-9)
         return -(p * torch.log(p)).sum(dim=-1).mean()
 
